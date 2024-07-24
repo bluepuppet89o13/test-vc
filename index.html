@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sci-Fi Voice Chat</title>
+    <style>
+        body {
+            font-family: 'Orbitron', sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #0d0d0d;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+        #chat-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            border-radius: 12px;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.5);
+            width: 80%;
+            max-width: 800px;
+            margin: auto;
+            margin-top: 50px;
+        }
+        #start-button {
+            padding: 12px 24px;
+            font-size: 18px;
+            color: #fff;
+            background: #00bcd4;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.3s ease;
+        }
+        #start-button:hover {
+            background: #0097a7;
+        }
+        #status {
+            margin-top: 20px;
+            font-size: 16px;
+        }
+        #remote-audio {
+            display: none;
+        }
+        .room-list {
+            margin-top: 20px;
+            width: 100%;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .room {
+            background: #1a1a1a;
+            margin-bottom: 10px;
+            padding: 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.3s ease;
+        }
+        .room:hover {
+            background: #333;
+        }
+    </style>
+</head>
+<body>
+    <div id="chat-container">
+        <h1>🚀 Sci-Fi Voice Chat</h1>
+        <button id="start-button">Start Voice Chat</button>
+        <div id="status"></div>
+        <div class="room-list" id="room-list">
+            <!-- Rooms will be dynamically added here -->
+        </div>
+        <audio id="remote-audio" autoplay></audio>
+    </div>
+    <script>
+        const startButton = document.getElementById('start-button');
+        const statusDiv = document.getElementById('status');
+        const remoteAudio = document.getElementById('remote-audio');
+        const roomList = document.getElementById('room-list');
+
+        // Inline WebSocket server simulation
+        class FakeWebSocket {
+            constructor(url) {
+                this.url = url;
+                this.listeners = {};
+                setTimeout(() => this._simulateConnection(), 1000);
+            }
+
+            _simulateConnection() {
+                this._simulateMessage({ type: 'room_list', rooms: ['Room1', 'Room2'] });
+            }
+
+            send(message) {
+                console.log('Sending message:', message);
+            }
+
+            onmessage(callback) {
+                this.messageCallback = callback;
+            }
+
+            _simulateMessage(message) {
+                if (this.messageCallback) {
+                    this.messageCallback({ data: JSON.stringify(message) });
+                }
+            }
+        }
+
+        const ws = new FakeWebSocket('ws://localhost:8080'); // Replace with your WebSocket server URL
+
+        let localStream;
+        let peerConnections = {};
+        let roomId = null;
+
+        startButton.addEventListener('click', async () => {
+            try {
+                // Request access to the user's microphone
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                statusDiv.textContent = 'Microphone access granted';
+
+                ws.onmessage = async (message) => {
+                    const data = JSON.parse(message.data);
+
+                    if (data.type === 'offer') {
+                        handleOffer(data.offer, data.from);
+                    } else if (data.type === 'answer') {
+                        handleAnswer(data.answer, data.from);
+                    } else if (data.type === 'candidate') {
+                        handleCandidate(data.candidate, data.from);
+                    } else if (data.type === 'room_list') {
+                        updateRoomList(data.rooms);
+                    }
+                };
+
+                function createPeerConnection(room) {
+                    const pc = new RTCPeerConnection();
+                    peerConnections[room] = pc;
+
+                    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+                    pc.ontrack = (event) => {
+                        const remoteStream = new MediaStream();
+                        remoteStream.addTrack(event.track);
+                        remoteAudio.srcObject = remoteStream;
+                    };
+
+                    pc.onicecandidate = (event) => {
+                        if (event.candidate) {
+                            ws.send(JSON.stringify({
+                                type: 'candidate',
+                                candidate: event.candidate,
+                                room: room
+                            }));
+                        }
+                    };
+
+                    return pc;
+                }
+
+                async function handleOffer(offer, from) {
+                    const pc = createPeerConnection(from);
+                    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(new RTCSessionDescription(answer));
+
+                    ws.send(JSON.stringify({
+                        type: 'answer',
+                        answer: pc.localDescription,
+                        to: from
+                    }));
+                }
+
+                async function handleAnswer(answer, from) {
+                    const pc = peerConnections[from];
+                    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+                }
+
+                async function handleCandidate(candidate, from) {
+                    const pc = peerConnections[from];
+                    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+                }
+
+                function joinRoom(room) {
+                    if (roomId) {
+                        ws.send(JSON.stringify({
+                            type: 'leave',
+                            room: roomId
+                        }));
+                        delete peerConnections[roomId];
+                    }
+                    roomId = room;
+                    ws.send(JSON.stringify({
+                        type: 'join',
+                        room: room
+                    }));
+                }
+
+                function updateRoomList(rooms) {
+                    roomList.innerHTML = '';
+                    rooms.forEach(room => {
+                        const div = document.createElement('div');
+                        div.className = 'room';
+                        div.textContent = room;
+                        div.onclick = () => joinRoom(room);
+                        roomList.appendChild(div);
+                    });
+                }
+
+                ws.send(JSON.stringify({ type: 'list_rooms' }));
+
+            } catch (error) {
+                statusDiv.textContent = `Error: ${error.message}`;
+            }
+        });
+    </script>
+</body>
+</html>
